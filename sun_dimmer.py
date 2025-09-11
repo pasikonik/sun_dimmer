@@ -50,7 +50,7 @@ DEFAULT_CONFIG = {
     'system': {
         'update_interval': 300,
         'log_level': 'INFO',
-        'log_before_change_minutes': 15  # Rozpocznij logowanie X minut przed zmianą
+        'log_before_change_minutes': 15 
     },
     'devices': [
         {'type': 'laptop', 'id': None, 'name': 'Ekran laptopa'},
@@ -64,7 +64,7 @@ class SunDimmer:
         self.state_path = STATE_FILE
         self.running = True
         self.last_logged_brightness = None
-        self.enable_colors = sys.stdout.isatty()  # Kolory tylko w terminalu
+        self.enable_colors = True 
         
         # Załaduj konfigurację i stan po ustawieniu enable_colors
         self.config = self.load_config()
