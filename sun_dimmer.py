@@ -16,9 +16,18 @@ from pysolar.solar import get_altitude
 
 # --- Klasa do zarządzania kolorami w terminalu ---
 class Colors:
-    RESET = '\033[0m'; BOLD = '\033[1m'; RED = '\033[31m'; GREEN = '\033[32m'
-    YELLOW = '\033[33m'; BLUE = '\033[34m'; MAGENTA = '\033[35m'; CYAN = '\033[36m'
-    WHITE = '\033[37m'; BRIGHT_CYAN = '\033[96m'; BRIGHT_YELLOW = '\033[93m'; BRIGHT_MAGENTA = '\033[95m'
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    BLUE = '\033[34m'
+    MAGENTA = '\033[35m'
+    CYAN = '\033[36m'
+    WHITE = '\033[37m'
+    BRIGHT_CYAN = '\033[96m'
+    BRIGHT_YELLOW = '\033[93m'
+    BRIGHT_MAGENTA = '\033[95m'
 
 # --- KONFIGURACJA ---
 CONFIG_FILE = Path.home() / '.config' / 'sun_dimmer' / 'config.json'
@@ -40,7 +49,8 @@ DEFAULT_CONFIG = {
     },
     'system': {
         'update_interval': 300,
-        'log_level': 'INFO'
+        'log_level': 'INFO',
+        'log_before_change_minutes': 15  # Rozpocznij logowanie X minut przed zmianą
     },
     'devices': [
         {'type': 'laptop', 'id': None, 'name': 'Ekran laptopa'},
@@ -52,9 +62,13 @@ class SunDimmer:
     def __init__(self, config_path=None):
         self.config_path = config_path or CONFIG_FILE
         self.state_path = STATE_FILE
+        self.running = True
+        self.last_logged_brightness = None
+        self.enable_colors = sys.stdout.isatty()  # Kolory tylko w terminalu
+        
+        # Załaduj konfigurację i stan po ustawieniu enable_colors
         self.config = self.load_config()
         self.state = self.load_state()
-        self.running = True
         
         # Obsługa sygnałów do czystego zamknięcia
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -65,6 +79,12 @@ class SunDimmer:
         self.save_state()
         self.running = False
         sys.exit(0)
+    
+    def colorize(self, text, color_code):
+        """Dodaje kolory tylko jeśli terminal to obsługuje."""
+        if self.enable_colors:
+            return f"{color_code}{text}{Colors.RESET}"
+        return text
         
     def load_config(self):
         """Ładuje konfigurację z pliku lub tworzy domyślną."""
@@ -72,6 +92,9 @@ class SunDimmer:
             try:
                 with open(self.config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
+                # Dodaj nowe opcje jeśli nie istnieją
+                if 'log_before_change_minutes' not in config.get('system', {}):
+                    config.setdefault('system', {})['log_before_change_minutes'] = 15
                 self.log_message('SUCCESS', f"Załadowano konfigurację z {self.config_path}")
                 return config
             except Exception as e:
@@ -92,7 +115,7 @@ class SunDimmer:
                     state = json.load(f)
                 offset = state.get('user_offset', 0)
                 if offset != 0:
-                    offset_str = f"{Colors.BRIGHT_MAGENTA}{Colors.BOLD}{int(offset):+d}%{Colors.RESET}"
+                    offset_str = self.colorize(f"{int(offset):+d}%", f"{Colors.BRIGHT_MAGENTA}{Colors.BOLD}")
                     self.log_message('INFO', f"Przywrócono zapisany offset: {offset_str}")
                 return state
             except Exception as e:
@@ -110,8 +133,10 @@ class SunDimmer:
             self.log_message('ERROR', f"Błąd zapisywania stanu: {e}")
 
     def log_message(self, level, message):
+        """Loguje wiadomość z odpowiednimi kolorami."""
         now = datetime.now().strftime('%H:%M:%S')
-        timestamp = f"{Colors.WHITE}[{now}]{Colors.RESET}"
+        timestamp = self.colorize(f"[{now}]", Colors.WHITE)
+        
         level_map = {
             'INFO': {'tag': ' INFO  ', 'color': Colors.BLUE}, 
             'SUCCESS': {'tag': 'SUCCESS', 'color': Colors.GREEN},
@@ -119,8 +144,31 @@ class SunDimmer:
             'ERROR': {'tag': ' ERROR ', 'color': Colors.RED}
         }
         level_info = level_map.get(level.upper(), {'tag': '  LOG  ', 'color': Colors.WHITE})
-        level_tag = f"{level_info['color']}{Colors.BOLD}[{level_info['tag']}]{Colors.RESET}"
+        level_tag = self.colorize(f"[{level_info['tag']}]", f"{level_info['color']}{Colors.BOLD}")
         print(f"{timestamp} {level_tag} {message}")
+
+    def should_log_now(self, current_brightness, next_brightness):
+        """Sprawdza czy powinniśmy logować w tym momencie."""
+        # Zawsze loguj błędy, ostrzeżenia i ważne zdarzenia
+        return True
+    
+    def will_brightness_change_soon(self, lat, lon):
+        """Sprawdza czy jasność zmieni się w ciągu następnych X minut."""
+        try:
+            log_minutes = self.config['system']['log_before_change_minutes']
+            current_time = datetime.now().astimezone()
+            future_time = datetime.fromtimestamp(current_time.timestamp() + log_minutes * 60).astimezone()
+            
+            current_altitude = get_altitude(lat, lon, current_time)
+            future_altitude = get_altitude(lat, lon, future_time)
+            
+            current_brightness = self.calculate_brightness_from_sun(current_altitude) + self.state['user_offset']
+            future_brightness = self.calculate_brightness_from_sun(future_altitude) + self.state['user_offset']
+            
+            # Sprawdź czy jasność zmieni się o więcej niż 1%
+            return abs(future_brightness - current_brightness) > 1
+        except:
+            return True  # W przypadku błędu, loguj dla bezpieczeństwa
 
     def get_location(self):
         """Pobiera lokalizację zgodnie z konfiguracją."""
@@ -188,14 +236,15 @@ class SunDimmer:
             self.log_message('ERROR', f"Nie można odczytać jasności z '{device['name']}': {e}")
         return None
 
-    def set_brightness(self, percentage):
+    def set_brightness(self, percentage, should_log=True):
         """Ustawia nową jasność na wszystkich urządzeniach z listy."""
         brightness_config = self.config['brightness']
         percentage = max(brightness_config['min_brightness'], 
                         min(brightness_config['max_brightness'], int(percentage)))
         
-        value_str = f"{Colors.BRIGHT_YELLOW}{Colors.BOLD}{percentage}%{Colors.RESET}"
-        self.log_message('INFO', f"Ustawiam jasność na {value_str}")
+        if should_log:
+            value_str = self.colorize(f"{percentage}%", f"{Colors.BRIGHT_YELLOW}{Colors.BOLD}")
+            self.log_message('INFO', f"Ustawiam jasność na {value_str}")
 
         success_flag = True
         for device in self.config['devices']:
@@ -209,7 +258,8 @@ class SunDimmer:
                 if cmd:
                     subprocess.run(cmd, check=True, capture_output=True, text=True)
             except Exception as e:
-                self.log_message('ERROR', f"Błąd dla '{device['name']}': {e}")
+                if should_log:
+                    self.log_message('ERROR', f"Błąd dla '{device['name']}': {e}")
                 success_flag = False
                 
         return percentage if success_flag else None
@@ -234,8 +284,8 @@ class SunDimmer:
         self.state['user_offset'] = new_offset
         self.save_state()
         
-        old_str = f"{Colors.BRIGHT_MAGENTA}{Colors.BOLD}{int(old_offset):+d}%{Colors.RESET}"
-        new_str = f"{Colors.BRIGHT_MAGENTA}{Colors.BOLD}{int(new_offset):+d}%{Colors.RESET}"
+        old_str = self.colorize(f"{int(old_offset):+d}%", f"{Colors.BRIGHT_MAGENTA}{Colors.BOLD}")
+        new_str = self.colorize(f"{int(new_offset):+d}%", f"{Colors.BRIGHT_MAGENTA}{Colors.BOLD}")
         self.log_message('INFO', f"Zmieniono offset z {old_str} na {new_str}")
         
         return True
@@ -252,7 +302,7 @@ class SunDimmer:
     def run(self):
         """Główna pętla programu."""
         self.log_message('INFO', "Uruchamiam Sun Dimmer...")
-        device_names = ', '.join([f"{Colors.BOLD}{d['name']}{Colors.RESET}" 
+        device_names = ', '.join([self.colorize(d['name'], Colors.BOLD) 
                                  for d in self.config['devices']])
         self.log_message('INFO', f"Kontrolowane urządzenia: {device_names}")
 
@@ -261,7 +311,8 @@ class SunDimmer:
             self.log_message('ERROR', "Nie udało się ustalić lokalizacji.")
             return
             
-        self.log_message('SUCCESS', f"Lokalizacja: ({Colors.BOLD}{lat:.4f}, {lon:.4f}{Colors.RESET})")
+        location_str = self.colorize(f"({lat:.4f}, {lon:.4f})", Colors.BOLD)
+        self.log_message('SUCCESS', f"Lokalizacja: {location_str}")
 
         last_set_brightness = self.get_current_brightness() or 50
         is_first_run = True
@@ -277,29 +328,43 @@ class SunDimmer:
                 
                 calculated_brightness = self.calculate_brightness_from_sun(altitude)
                 
+                # Sprawdź czy wkrótce nastąpi zmiana jasności
+                should_log = self.will_brightness_change_soon(lat, lon)
+                
                 # Wykrywanie ręcznych zmian jasności
                 if not is_first_run and current_actual_brightness is not None:
                     tolerance = self.config['brightness']['manual_change_tolerance']
                     if abs(current_actual_brightness - last_set_brightness) > tolerance:
                         new_offset = current_actual_brightness - calculated_brightness
-                        offset_str = f"{Colors.BRIGHT_MAGENTA}{Colors.BOLD}{int(new_offset):+d}%{Colors.RESET}"
+                        offset_str = self.colorize(f"{int(new_offset):+d}%", f"{Colors.BRIGHT_MAGENTA}{Colors.BOLD}")
                         self.log_message('WARN', f"Wykryto ręczną zmianę! Nowy offset: {offset_str}")
                         self.set_offset(new_offset)
 
                 final_brightness = calculated_brightness + self.state['user_offset']
-                newly_set_brightness = self.set_brightness(final_brightness)
+                
+                # Sprawdź czy jasność rzeczywiście się zmieni
+                brightness_will_change = (self.last_logged_brightness is None or 
+                                        abs(final_brightness - self.last_logged_brightness) > 0.5)
+                
+                # Ustaw jasność (loguj tylko jeśli to konieczne)
+                newly_set_brightness = self.set_brightness(final_brightness, should_log and brightness_will_change)
                 
                 if newly_set_brightness is not None:
                     last_set_brightness = newly_set_brightness
                     self.state['last_brightness'] = newly_set_brightness
                     self.save_state()
+                    
+                    if brightness_will_change:
+                        self.last_logged_brightness = final_brightness
                 
                 is_first_run = False
                 
-                alt_str = f"{Colors.BRIGHT_CYAN}{Colors.BOLD}{altitude:.2f}°{Colors.RESET}"
-                offset_info = f"(offset: {int(self.state['user_offset']):+d}%)" if self.state['user_offset'] != 0 else ""
-                interval_min = int(self.config['system']['update_interval'] / 60)
-                self.log_message('INFO', f"Słońce: {alt_str}. Oczekuję {interval_min}min {offset_info}")
+                # Loguj status tylko gdy to potrzebne
+                if should_log:
+                    alt_str = self.colorize(f"{altitude:.2f}°", f"{Colors.BRIGHT_CYAN}{Colors.BOLD}")
+                    offset_info = f"(offset: {int(self.state['user_offset']):+d}%)" if self.state['user_offset'] != 0 else ""
+                    interval_min = int(self.config['system']['update_interval'] / 60)
+                    self.log_message('INFO', f"Słońce: {alt_str}. Oczekuję {interval_min}min {offset_info}")
                 
                 time.sleep(self.config['system']['update_interval'])
                 
