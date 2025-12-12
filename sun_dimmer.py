@@ -95,7 +95,7 @@ class SunDimmer:
                 # Dodaj nowe opcje jeśli nie istnieją
                 if 'log_before_change_minutes' not in config.get('system', {}):
                     config.setdefault('system', {})['log_before_change_minutes'] = 15
-                self.log_message('SUCCESS', f"Załadowano konfigurację z {self.config_path}")
+                #self.log_message('SUCCESS', f"Załadowano konfigurację z {self.config_path}")
                 return config
             except Exception as e:
                 self.log_message('ERROR', f"Błąd ładowania konfiguracji: {e}")
@@ -236,7 +236,7 @@ class SunDimmer:
             self.log_message('ERROR', f"Nie można odczytać jasności z '{device['name']}': {e}")
         return None
 
-    def set_brightness(self, percentage, should_log=True):
+    def set_brightness(self, percentage, should_log=True, altitude=None):
         """Ustawia nową jasność na wszystkich urządzeniach z listy."""
         brightness_config = self.config['brightness']
         percentage = max(brightness_config['min_brightness'], 
@@ -244,7 +244,10 @@ class SunDimmer:
         
         if should_log:
             value_str = self.colorize(f"{percentage}%", f"{Colors.BRIGHT_YELLOW}{Colors.BOLD}")
-            self.log_message('INFO', f"Ustawiam jasność na {value_str}")
+            alt_str = self.colorize(f"{altitude:.2f}°", f"{Colors.BRIGHT_CYAN}{Colors.BOLD}") if altitude is not None else ""
+            offset_info = f" (offset: {int(self.state['user_offset']):+d}%)" if self.state['user_offset'] != 0 else ""
+            sun_info = f" | Słońce: {alt_str}{offset_info}" if altitude is not None else ""
+            self.log_message('INFO', f"Ustawiam jasność na {value_str}{sun_info}")
 
         success_flag = True
         for device in self.config['devices']:
@@ -301,7 +304,6 @@ class SunDimmer:
 
     def run(self):
         """Główna pętla programu."""
-        self.log_message('INFO', "Uruchamiam Sun Dimmer...")
         device_names = ', '.join([self.colorize(d['name'], Colors.BOLD) 
                                  for d in self.config['devices']])
         self.log_message('INFO', f"Kontrolowane urządzenia: {device_names}")
@@ -346,8 +348,8 @@ class SunDimmer:
                 brightness_will_change = (self.last_logged_brightness is None or 
                                         abs(final_brightness - self.last_logged_brightness) > 0.5)
                 
-                # Ustaw jasność (loguj tylko jeśli to konieczne)
-                newly_set_brightness = self.set_brightness(final_brightness, should_log and brightness_will_change)
+                # Ustaw jasność (loguj tylko jeśli to konieczne, przekaż altitude dla połączonego logu)
+                newly_set_brightness = self.set_brightness(final_brightness, should_log and brightness_will_change, altitude)
                 
                 if newly_set_brightness is not None:
                     last_set_brightness = newly_set_brightness
@@ -358,13 +360,6 @@ class SunDimmer:
                         self.last_logged_brightness = final_brightness
                 
                 is_first_run = False
-                
-                # Loguj status tylko gdy to potrzebne
-                if should_log:
-                    alt_str = self.colorize(f"{altitude:.2f}°", f"{Colors.BRIGHT_CYAN}{Colors.BOLD}")
-                    offset_info = f"(offset: {int(self.state['user_offset']):+d}%)" if self.state['user_offset'] != 0 else ""
-                    interval_min = int(self.config['system']['update_interval'] / 60)
-                    self.log_message('INFO', f"Słońce: {alt_str}. Oczekuję {interval_min}min {offset_info}")
                 
                 time.sleep(self.config['system']['update_interval'])
                 
